@@ -22,34 +22,63 @@ mongoose.connect('mongodb://127.0.0.1:27017/localfirst_db')
 const todoSchema = new mongoose.Schema({
     id: { type: String, required: true, unique: true }, // Client-side ID
     text: String,
-    isDone: Boolean,
-    updatedAt: { type: Number, required: true },
-    deleted: { type: Boolean, default: false } // Soft delete
+    isDone: { type: Boolean, index: true },
+    updatedAt: { type: Number, required: true, index: true },
+    deleted: { type: Boolean, default: false, index: true } // Soft delete
 });
 
 const Todo = mongoose.model('Todo', todoSchema);
 
 // --- SYNC ENDPOINTS ---
 
-// 1. PULL: Send changes to client
+// 1. PULL: Send changes to client with pagination & priority filtering
 app.get('/sync', async (req, res) => {
-    const lastPulledAt = parseInt(req.query.lastPulledAt) || 0;
-    const changes = await Todo.find({ updatedAt: { $gt: lastPulledAt } });
-    res.json({ documents: changes, checkpoint: Date.now() });
+    try {
+        const lastPulledAt = parseInt(req.query.lastPulledAt) || 0;
+        const activeOnly = req.query.activeOnly === 'true';
+        const limit = Math.min(parseInt(req.query.limit) || 100, 500); // Max 500 per batch
+        
+        const query = { updatedAt: { $gt: lastPulledAt } };
+        if (activeOnly) {
+            query.isDone = false;
+            query.deleted = false;
+        }
+        
+        const changes = await Todo.find(query)
+            .sort({ updatedAt: 1 })
+            .limit(limit)
+            .lean();
+        
+        res.json({ documents: changes, checkpoint: Date.now() });
+    } catch (err) {
+        console.error('Sync pull error:', err);
+        res.status(500).json({ error: 'Sync failed' });
+    }
 });
 
 // 2. PUSH: Receive changes from client
 app.post('/sync', async (req, res) => {
-    const { changes } = req.body;
-    for (const change of changes) {
-        await Todo.findOneAndUpdate(
-            { id: change.id },
-            change,
-            { upsert: true, new: true }
-        );
+    try {
+        const { changes } = req.body;
+        if (!changes || changes.length > 500) {
+            return res.status(400).json({ error: 'Invalid batch size' });
+        }
+        
+        const bulkOps = changes.map(change => ({
+            updateOne: {
+                filter: { id: change.id },
+                update: { $set: change },
+                upsert: true
+            }
+        }));
+        
+        await Todo.bulkWrite(bulkOps);
+        io.emit('data-changed'); // Notify all clients
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Sync push error:', err);
+        res.status(500).json({ error: 'Sync failed' });
     }
-    io.emit('data-changed'); // Notify all clients
-    res.json({ success: true });
 });
 
 httpServer.listen(5000, () => console.log('Server running on port 5000'));
