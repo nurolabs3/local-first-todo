@@ -1,7 +1,14 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+
 const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+    cors: { origin: 'http://localhost:5173', credentials: true }
+});
 
 app.use(cors());
 app.use(express.json());
@@ -41,7 +48,8 @@ app.post('/sync', async (req, res) => {
             { upsert: true, new: true }
         );
     }
+    io.emit('data-changed'); // Notify all clients
     res.json({ success: true });
 });
 
-app.listen(5000, () => console.log('Server running on port 5000'));
+httpServer.listen(5000, () => console.log('Server running on port 5000'));
